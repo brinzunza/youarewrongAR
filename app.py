@@ -111,7 +111,9 @@ if __name__ == '__main__':
     print("\n" + "="*50)
     print("🤖 You Are Wrong AR")
     print("="*50)
-    print(f"Access: http://localhost:{port}")
+    print(f"Access: https://localhost:{port}")
     print("="*50 + "\n")
 
-    socketio.run(app, debug=True, host='0.0.0.0', port=port, allow_unsafe_werkzeug=True)
+    socketio.run(app, debug=True, host='0.0.0.0', port=port,
+                 allow_unsafe_werkzeug=True,
+                 ssl_context=('cert.pem', 'key.pem'))

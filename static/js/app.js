@@ -4,16 +4,44 @@ class App {
         this.recognition = null;
         this.faceMesh = null;
         this.isListening = false;
+        this.stream = null;
+        this.animationId = null;
+        
+        // Mobile starting on back camera
+        this.isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+        this.currentFacingMode = this.isMobile ? 'environment' : 'user';
+
+        // Dev mode check from URL
+        const urlParams = new URLSearchParams(window.location.search);
+        this.isDevMode = urlParams.get('dev') === 'true';
 
         this.video = document.getElementById('video');
         this.canvas = document.getElementById('canvas');
         this.ctx = this.canvas.getContext('2d');
+        
+        // UI Elements
         this.status = document.getElementById('status');
         this.border = document.getElementById('border');
-        this.conversation = document.getElementById('conversation');
+        this.overlay = document.getElementById('conversation-overlay');
         this.toggleBtn = document.getElementById('toggleBtn');
-        this.clearBtn = document.getElementById('clearBtn');
+        this.switchBtn = document.getElementById('switchBtn');
         this.loading = document.getElementById('loading');
+        
+        // Focus Ring Element
+        this.focusRing = document.createElement('div');
+        this.focusRing.className = 'focus-ring hidden';
+        this.focusRingInner = document.createElement('div');
+        this.focusRingInner.className = 'focus-ring-inner';
+        this.focusRing.appendChild(this.focusRingInner);
+        document.querySelector('.video-container').appendChild(this.focusRing);
+
+        this.selectedFaceIndex = 0;
+        this.multiFaceLandmarks = [];
+
+        if (this.isDevMode) {
+            document.body.classList.add('dev-mode');
+            this.status.classList.remove('hidden');
+        }
 
         this.init();
     }
@@ -21,9 +49,17 @@ class App {
     async init() {
         this.setupSocket();
         this.setupControls();
-        await this.setupCamera();
         this.setupFaceMesh();
+        await this.setupCamera();
         this.setupSpeech();
+
+        if (this.isMobile) {
+            this.switchBtn.classList.remove('hidden');
+        }
+
+        // Tap to readjust person
+        this.canvas.addEventListener('click', (e) => this.handleCanvasClick(e));
+        this.canvas.style.pointerEvents = 'auto';
     }
 
     setupSocket() {
@@ -35,7 +71,7 @@ class App {
 
         this.socket.on('ai_response', (data) => {
             this.hideLoading();
-            this.displayResponse(data.statement, data.response);
+            this.displayOverlayResponse(data.statement, data.response);
             this.updateStatus('RESPONSE');
             this.updateBorder('response');
         });
@@ -43,52 +79,202 @@ class App {
 
     setupControls() {
         this.toggleBtn.onclick = () => this.toggle();
-        this.clearBtn.onclick = () => this.clear();
+        this.switchBtn.onclick = () => this.switchCamera();
         window.onresize = () => this.resizeCanvas();
     }
 
     async setupCamera() {
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({
-                video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+            // Stop any existing stream and animation
+            if (this.stream) {
+                this.stream.getTracks().forEach(track => track.stop());
+            }
+            if (this.animationId) {
+                cancelAnimationFrame(this.animationId);
+            }
+
+            const constraints = {
+                video: { 
+                    facingMode: this.currentFacingMode,
+                    width: { ideal: 1280 },
+                    height: { ideal: 720 }
+                },
                 audio: false
-            });
-            this.video.srcObject = stream;
-            this.video.onloadedmetadata = () => this.resizeCanvas();
+            };
+
+            this.stream = await navigator.mediaDevices.getUserMedia(constraints);
+            this.video.srcObject = this.stream;
+            
+            // Mirror only selfie camera
+            const isUser = this.currentFacingMode === 'user' || 
+                          (this.stream.getVideoTracks()[0].getSettings().facingMode === 'user');
+            
+            const transform = isUser ? 'scaleX(-1)' : 'scaleX(1)';
+            this.video.style.transform = transform;
+            this.canvas.style.transform = transform;
+
+            this.video.onloadedmetadata = () => {
+                this.resizeCanvas();
+                this.video.play();
+                this.startProcessingLoop();
+            };
         } catch (error) {
             console.error('Camera error:', error);
             this.updateStatus('CAMERA ERROR');
+            // Fallback if environment fails
+            if (this.currentFacingMode === 'environment') {
+                this.currentFacingMode = 'user';
+                await this.setupCamera();
+            }
         }
     }
 
+    startProcessingLoop() {
+        const process = async () => {
+            if (this.video.paused || this.video.ended) return;
+            await this.faceMesh.send({ image: this.video });
+            this.animationId = requestAnimationFrame(process);
+        };
+        process();
+    }
+
+    async switchCamera() {
+        this.currentFacingMode = this.currentFacingMode === 'user' ? 'environment' : 'user';
+        await this.setupCamera();
+    }
+
     setupFaceMesh() {
+        if (this.faceMesh) return;
+
         this.faceMesh = new FaceMesh({
             locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
         });
 
         this.faceMesh.setOptions({
-            maxNumFaces: 1,
+            maxNumFaces: 4,
             refineLandmarks: true,
             minDetectionConfidence: 0.5,
             minTrackingConfidence: 0.5
         });
 
-        this.faceMesh.onResults((results) => this.onFaceResults(results));
-
-        const camera = new Camera(this.video, {
-            onFrame: async () => await this.faceMesh.send({ image: this.video }),
-            width: 640,
-            height: 480
+        this.faceMesh.onResults((results) => {
+            this.multiFaceLandmarks = results.multiFaceLandmarks || [];
+            this.render();
         });
-        camera.start();
+    }
+
+    handleCanvasClick(e) {
+        const rect = this.canvas.getBoundingClientRect();
+        const x = (e.clientX - rect.left) / rect.width;
+        const y = (e.clientY - rect.top) / rect.height;
+
+        let minDest = Infinity;
+        let closestIndex = -1;
+
+        this.multiFaceLandmarks.forEach((landmarks, index) => {
+            const center = landmarks[1]; // Nose tip
+            const dist = Math.hypot(x - center.x, y - center.y);
+            if (dist < minDest) {
+                minDest = dist;
+                closestIndex = index;
+            }
+        });
+
+        if (minDest < 0.2 && closestIndex !== -1) {
+            this.selectedFaceIndex = closestIndex;
+            // Brief visual feedback for switch
+            this.focusRing.style.borderColor = '#0f0';
+            setTimeout(() => this.focusRing.style.borderColor = '#fff', 300);
+        }
+    }
+
+    render() {
+        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+
+        if (this.multiFaceLandmarks.length > 0) {
+            const selectedLandmarks = this.multiFaceLandmarks[this.selectedFaceIndex] || this.multiFaceLandmarks[0];
+            if (!this.multiFaceLandmarks[this.selectedFaceIndex]) this.selectedFaceIndex = 0;
+
+            // 1. Update Focus Ring UI
+            this.updateFocusRing(selectedLandmarks);
+
+            // 2. Dev mode visualization
+            if (this.isDevMode) {
+                this.multiFaceLandmarks.forEach((landmarks, i) => {
+                    this.drawMouth(landmarks, i === this.selectedFaceIndex);
+                });
+            }
+
+            // 3. Logic for selected person
+            const ratio = this.getMouthRatio(selectedLandmarks);
+            if (this.isListening && ratio > 0.02) {
+                this.updateStatus('TALKING');
+                this.updateBorder('talking');
+            } else if (this.isListening) {
+                this.updateStatus('LISTENING');
+                this.updateBorder('listening');
+            }
+        } else {
+            this.focusRing.classList.add('hidden');
+            if (this.isListening) {
+                this.updateStatus('WAITING FOR FACE');
+                this.updateBorder('');
+            }
+        }
+    }
+
+    updateFocusRing(landmarks) {
+        // Find face bounds
+        let minX = 1, minY = 1, maxX = 0, maxY = 0;
+        landmarks.forEach(p => {
+            if (p.x < minX) minX = p.x;
+            if (p.x > maxX) maxX = p.x;
+            if (p.y < minY) minY = p.y;
+            if (p.y > maxY) maxY = p.y;
+        });
+
+        const width = (maxX - minX) * this.canvas.width;
+        const height = (maxY - minY) * this.canvas.height;
+        const size = Math.max(width, height) * 1.5;
+        
+        const centerX = ((minX + maxX) / 2) * this.canvas.width;
+        const centerY = ((minY + maxY) / 2) * this.canvas.height;
+
+        this.focusRing.style.width = `${size}px`;
+        this.focusRing.style.height = `${size}px`;
+        this.focusRing.style.left = `${centerX - size/2}px`;
+        this.focusRing.style.top = `${centerY - size/2}px`;
+        this.focusRing.classList.remove('hidden');
+    }
+
+    drawMouth(landmarks, isSelected) {
+        const mouthIndices = [61, 146, 91, 181, 84, 17, 314, 405, 320, 307, 375, 321, 308, 324, 318];
+        this.ctx.strokeStyle = isSelected ? '#0f0' : 'rgba(255, 255, 255, 0.3)';
+        this.ctx.lineWidth = isSelected ? 3 : 1;
+        this.ctx.beginPath();
+        mouthIndices.forEach((idx, i) => {
+            const point = landmarks[idx];
+            const x = point.x * this.canvas.width;
+            const y = point.y * this.canvas.height;
+            i === 0 ? this.ctx.moveTo(x, y) : this.ctx.lineTo(x, y);
+        });
+        this.ctx.closePath();
+        this.ctx.stroke();
+    }
+
+    getMouthRatio(landmarks) {
+        const top = landmarks[13];
+        const bottom = landmarks[14];
+        const left = landmarks[61];
+        const right = landmarks[291];
+        const vDist = Math.hypot((top.x-bottom.x)*this.canvas.width, (top.y-bottom.y)*this.canvas.height);
+        const hDist = Math.hypot((left.x-right.x)*this.canvas.width, (left.y-right.y)*this.canvas.height);
+        return hDist > 0 ? vDist / hDist : 0;
     }
 
     setupSpeech() {
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-        if (!SpeechRecognition) {
-            this.updateStatus('SPEECH NOT SUPPORTED');
-            return;
-        }
+        if (!SpeechRecognition) return;
 
         this.recognition = new SpeechRecognition();
         this.recognition.continuous = true;
@@ -105,81 +291,15 @@ class App {
             }
         };
 
-        this.recognition.onerror = (event) => {
-            if (event.error === 'not-allowed') {
-                this.updateStatus('MIC DENIED');
-                this.isListening = false;
-                this.toggleBtn.textContent = 'START';
-            }
-        };
-
         this.recognition.onend = () => {
             if (this.isListening) {
-                setTimeout(() => {
-                    if (this.isListening) this.recognition.start();
-                }, 100);
+                setTimeout(() => { if (this.isListening) this.recognition.start(); }, 100);
             }
         };
-    }
-
-    onFaceResults(results) {
-        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-
-        if (results.multiFaceLandmarks?.[0]) {
-            const landmarks = results.multiFaceLandmarks[0];
-            this.drawMouth(landmarks);
-
-            const ratio = this.getMouthRatio(landmarks);
-            if (this.isListening && ratio > 0.02) {
-                this.updateStatus('TALKING');
-                this.updateBorder('talking');
-            } else if (this.isListening) {
-                this.updateStatus('LISTENING');
-                this.updateBorder('listening');
-            }
-        }
-    }
-
-    drawMouth(landmarks) {
-        const mouthIndices = [61, 146, 91, 181, 84, 17, 314, 405, 320, 307, 375, 321, 308, 324, 318];
-
-        this.ctx.strokeStyle = '#0ff';
-        this.ctx.lineWidth = 2;
-        this.ctx.beginPath();
-
-        mouthIndices.forEach((idx, i) => {
-            const point = landmarks[idx];
-            const x = point.x * this.canvas.width;
-            const y = point.y * this.canvas.height;
-            i === 0 ? this.ctx.moveTo(x, y) : this.ctx.lineTo(x, y);
-        });
-
-        this.ctx.closePath();
-        this.ctx.stroke();
-    }
-
-    getMouthRatio(landmarks) {
-        const top = landmarks[13];
-        const bottom = landmarks[14];
-        const left = landmarks[61];
-        const right = landmarks[291];
-
-        const vDist = Math.hypot(
-            (top.x - bottom.x) * this.canvas.width,
-            (top.y - bottom.y) * this.canvas.height
-        );
-
-        const hDist = Math.hypot(
-            (left.x - right.x) * this.canvas.width,
-            (left.y - right.y) * this.canvas.height
-        );
-
-        return hDist > 0 ? vDist / hDist : 0;
     }
 
     toggle() {
         if (!this.recognition) return;
-
         if (this.isListening) {
             this.isListening = false;
             this.recognition.stop();
@@ -195,39 +315,32 @@ class App {
         }
     }
 
-    displayResponse(statement, response) {
-        this.conversation.innerHTML = `
-            <div class="message user-msg">
-                <div class="label">You</div>
-                <div class="text">"${statement}"</div>
-            </div>
-            <div class="message ai-msg">
-                <div class="label">AI</div>
-                <div class="text">${response}</div>
-            </div>
-        `;
+    displayOverlayResponse(statement, response) {
+        this.overlay.innerHTML = '';
+        const msgDiv = document.createElement('div');
+        msgDiv.className = 'overlay-msg';
+        const statementDiv = document.createElement('div');
+        statementDiv.className = 'overlay-statement';
+        statementDiv.textContent = statement;
+        const responseDiv = document.createElement('div');
+        responseDiv.className = 'overlay-response';
+        msgDiv.appendChild(statementDiv);
+        msgDiv.appendChild(responseDiv);
+        this.overlay.appendChild(msgDiv);
+        this.typeText(responseDiv, response, 0);
     }
 
-    clear() {
-        this.conversation.innerHTML = '<p class="hint">Say something to get started</p>';
+    typeText(element, text, index) {
+        if (index < text.length) {
+            element.textContent += text[index];
+            setTimeout(() => this.typeText(element, text, index + 1), 10);
+        }
     }
 
-    updateStatus(text) {
-        this.status.textContent = text;
-    }
-
-    updateBorder(state) {
-        this.border.className = state;
-    }
-
-    showLoading() {
-        this.loading.classList.remove('hidden');
-    }
-
-    hideLoading() {
-        this.loading.classList.add('hidden');
-    }
-
+    updateStatus(text) { if (this.isDevMode) this.status.textContent = text; }
+    updateBorder(state) { this.border.className = state; }
+    showLoading() { this.loading.classList.remove('hidden'); }
+    hideLoading() { this.loading.classList.add('hidden'); }
     resizeCanvas() {
         const rect = this.video.getBoundingClientRect();
         this.canvas.width = rect.width;

@@ -10,6 +10,7 @@
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/selfie_segmentation.js" crossorigin="anonymous"></script>
 </head>
 <body>
     <div class="container">
@@ -17,19 +18,18 @@
             <video id="video" autoplay muted playsinline></video>
             <canvas id="canvas"></canvas>
             <div id="border"></div>
-            <div id="status">TAP TO START</div>
-        </div>
-
-        <div class="response-panel" id="responsePanel">
-            <div id="conversation">
-                <p class="hint">Say something to get started</p>
-            </div>
+            <div id="status" class="hidden"></div>
+            <div id="conversation-overlay"></div>
         </div>
     </div>
 
     <div class="controls">
         <button id="toggleBtn">START</button>
-        <button id="clearBtn">CLEAR</button>
+        <button id="switchBtn" class="hidden">
+            <svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" stroke-width="2" fill="none">
+                <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"></path>
+            </svg>
+        </button>
     </div>
 
     <div id="loading" class="loading hidden">

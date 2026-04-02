@@ -27,14 +27,6 @@ class App {
         this.switchBtn = document.getElementById('switchBtn');
         this.loading = document.getElementById('loading');
         
-        // Focus Ring Element
-        this.focusRing = document.createElement('div');
-        this.focusRing.className = 'focus-ring hidden';
-        this.focusRingInner = document.createElement('div');
-        this.focusRingInner.className = 'focus-ring-inner';
-        this.focusRing.appendChild(this.focusRingInner);
-        document.querySelector('.video-container').appendChild(this.focusRing);
-
         this.selectedFaceIndex = 0;
         this.multiFaceLandmarks = [];
 
@@ -71,7 +63,7 @@ class App {
 
         this.socket.on('ai_response', (data) => {
             this.hideLoading();
-            this.displayOverlayResponse(data.statement, data.response);
+            this.displayOverlayResponse(data);
             this.updateStatus('RESPONSE');
             this.updateBorder('response');
         });
@@ -182,9 +174,6 @@ class App {
 
         if (minDest < 0.2 && closestIndex !== -1) {
             this.selectedFaceIndex = closestIndex;
-            // Brief visual feedback for switch
-            this.focusRing.style.borderColor = '#0f0';
-            setTimeout(() => this.focusRing.style.borderColor = '#fff', 300);
         }
     }
 
@@ -195,17 +184,14 @@ class App {
             const selectedLandmarks = this.multiFaceLandmarks[this.selectedFaceIndex] || this.multiFaceLandmarks[0];
             if (!this.multiFaceLandmarks[this.selectedFaceIndex]) this.selectedFaceIndex = 0;
 
-            // 1. Update Focus Ring UI
-            this.updateFocusRing(selectedLandmarks);
-
-            // 2. Dev mode visualization
+            // 1. Dev mode visualization
             if (this.isDevMode) {
                 this.multiFaceLandmarks.forEach((landmarks, i) => {
                     this.drawMouth(landmarks, i === this.selectedFaceIndex);
                 });
             }
 
-            // 3. Logic for selected person
+            // 2. Logic for selected person
             const ratio = this.getMouthRatio(selectedLandmarks);
             if (this.isListening && ratio > 0.02) {
                 this.updateStatus('TALKING');
@@ -215,36 +201,11 @@ class App {
                 this.updateBorder('listening');
             }
         } else {
-            this.focusRing.classList.add('hidden');
             if (this.isListening) {
                 this.updateStatus('WAITING FOR FACE');
                 this.updateBorder('');
             }
         }
-    }
-
-    updateFocusRing(landmarks) {
-        // Find face bounds
-        let minX = 1, minY = 1, maxX = 0, maxY = 0;
-        landmarks.forEach(p => {
-            if (p.x < minX) minX = p.x;
-            if (p.x > maxX) maxX = p.x;
-            if (p.y < minY) minY = p.y;
-            if (p.y > maxY) maxY = p.y;
-        });
-
-        const width = (maxX - minX) * this.canvas.width;
-        const height = (maxY - minY) * this.canvas.height;
-        const size = Math.max(width, height) * 1.5;
-        
-        const centerX = ((minX + maxX) / 2) * this.canvas.width;
-        const centerY = ((minY + maxY) / 2) * this.canvas.height;
-
-        this.focusRing.style.width = `${size}px`;
-        this.focusRing.style.height = `${size}px`;
-        this.focusRing.style.left = `${centerX - size/2}px`;
-        this.focusRing.style.top = `${centerY - size/2}px`;
-        this.focusRing.classList.remove('hidden');
     }
 
     drawMouth(landmarks, isSelected) {
@@ -315,19 +276,31 @@ class App {
         }
     }
 
-    displayOverlayResponse(statement, response) {
+    displayOverlayResponse(data) {
         this.overlay.innerHTML = '';
         const msgDiv = document.createElement('div');
         msgDiv.className = 'overlay-msg';
+        
+        // Truth Indicator
+        const truthDiv = document.createElement('div');
+        truthDiv.className = 'overlay-truth';
+        truthDiv.textContent = data.truth ? 'FACTUALLY ACCURATE' : 'FACTUALLY INCORRECT';
+        
+        // Original Statement
         const statementDiv = document.createElement('div');
         statementDiv.className = 'overlay-statement';
-        statementDiv.textContent = statement;
-        const responseDiv = document.createElement('div');
-        responseDiv.className = 'overlay-response';
+        statementDiv.textContent = `"${data.text}"`;
+        
+        // Counterargument
+        const counterDiv = document.createElement('div');
+        counterDiv.className = 'overlay-counter';
+        
+        msgDiv.appendChild(truthDiv);
         msgDiv.appendChild(statementDiv);
-        msgDiv.appendChild(responseDiv);
+        msgDiv.appendChild(counterDiv);
         this.overlay.appendChild(msgDiv);
-        this.typeText(responseDiv, response, 0);
+
+        this.typeText(counterDiv, data.counterargument, 0);
     }
 
     typeText(element, text, index) {

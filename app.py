@@ -2,6 +2,7 @@ from flask import Flask, render_template
 from flask_socketio import SocketIO, emit
 from openai import OpenAI
 import os
+import json
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -25,41 +26,51 @@ else:
         client = None
 
 def get_ai_counterargument(statement):
-    """Get AI fact-check and counterargument"""
+    """Get AI fact-check and counterargument in JSON format"""
     if not client:
-        return f"Truth: unknown\nCounter: OpenAI client not available. Check API key configuration."
+        return json.dumps({
+            "text": statement,
+            "truth": False,
+            "counterargument": "OpenAI client not available. Check API key configuration."
+        })
 
     try:
-        prompt = f"""You are a fact-checker. Someone just said: "{statement}"
+        prompt = f"""Analyze the following statement for factual accuracy.
+Statement: "{statement}"
 
-Please respond in EXACTLY this format:
-Truth: [true or false]
-Counter: [a simple and concise counter to their main arguments and their supporting facts]
+Respond ONLY with a JSON object in this EXACT format:
+{{
+  "text": "the original statement",
+  "truth": true or false,
+  "counterargument": "a concise (max 60 words) factual counter-point with evidence"
+}}
 
 Rules:
-1. For "Truth:" - Simply state "true" or "false" based on factual accuracy
-2. For "Counter:" - Provide a brief, factual counterargument with supporting evidence
-3. Keep the entire response under 80 words
-4. Be direct and factual, not humorous
-5. Focus on verifiable facts and logical reasoning
-
-Statement to analyze: "{statement}\""""
+1. "truth" must be a boolean (true if the statement is factually accurate, false otherwise).
+2. "counterargument" should be direct, factual, and provide a clear counter if the statement is false.
+3. If the statement is true, provide supporting context in the "counterargument" field.
+4. Do not include any text other than the JSON object."""
 
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "You are a factual analyzer who responds in the exact format: Truth: [true/false], Counter: [brief factual counter with evidence]."},
+                {"role": "system", "content": "You are a factual analyzer who responds only in JSON format."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=120,
-            temperature=0.3
+            max_tokens=200,
+            temperature=0.3,
+            response_format={ "type": "json_object" }
         )
 
         return response.choices[0].message.content.strip()
 
     except Exception as e:
         print(f"OpenAI API error: {e}")
-        return f"Truth: unknown\nCounter: Unable to fact-check '{statement}' at this time. Error: {str(e)}"
+        return json.dumps({
+            "text": statement,
+            "truth": False,
+            "counterargument": f"Unable to fact-check at this time. Error: {str(e)}"
+        })
 
 @app.route('/')
 def index():
@@ -73,28 +84,33 @@ def handle_speech(data):
         print(f"Received statement: {statement}")
 
         if statement and len(statement.split()) >= 3:
-            # Emit processing status
             emit('ai_processing', {'status': 'processing'})
-
-            # Get AI response
-            ai_response = get_ai_counterargument(statement)
-
-            # Send response back to client
-            emit('ai_response', {
-                'statement': statement,
-                'response': ai_response
-            })
+            
+            # Get AI response (already a JSON string from the helper)
+            ai_json_str = get_ai_counterargument(statement)
+            
+            try:
+                ai_data = json.loads(ai_json_str)
+                emit('ai_response', ai_data)
+            except json.JSONDecodeError:
+                emit('ai_response', {
+                    "text": statement,
+                    "truth": False,
+                    "counterargument": "Error parsing AI response."
+                })
         else:
             emit('ai_response', {
-                'statement': statement,
-                'response': 'Statement too short to analyze.'
+                "text": statement,
+                "truth": True,
+                "counterargument": "Statement too short to analyze."
             })
 
     except Exception as e:
         print(f"Error processing speech: {e}")
         emit('ai_response', {
-            'statement': data.get('statement', ''),
-            'response': 'Error processing your statement.'
+            "text": data.get('statement', ''),
+            "truth": False,
+            "counterargument": "Error processing your statement."
         })
 
 @socketio.on('connect')
@@ -108,12 +124,6 @@ def handle_disconnect():
 
 if __name__ == '__main__':
     port = 5001
-    print("\n" + "="*50)
-    print("🤖 You Are Wrong AR")
-    print("="*50)
-    print(f"Access: https://localhost:{port}")
-    print("="*50 + "\n")
-
     socketio.run(app, debug=True, host='0.0.0.0', port=port,
                  allow_unsafe_werkzeug=True,
                  ssl_context=('cert.pem', 'key.pem'))
